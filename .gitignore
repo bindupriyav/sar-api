@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# AWS credentials — never commit these
+.aws/
+*.pem
+credentials
+config
+
+# Environment files
+.env
+*.env
+
+# Agent output (may contain analysis data)
+agent_analysis_output.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
