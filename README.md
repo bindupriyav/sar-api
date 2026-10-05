@@ -107,3 +107,125 @@ subject to strict access, retention, and confidentiality controls under BSA
 regulations, and must never be stored or transmitted through non-FinCEN-
 authorized systems. Do not point this prototype's storage layer at real SAR
 data without the appropriate regulatory, security, and legal review.
+
+---
+
+# SAR Classification Agent (`POST /classify`)
+
+In addition to the read-only query endpoints above, the service exposes a
+**transaction classification** endpoint that flags potential **structuring**
+(a.k.a. "smurfing") — multiple sub-$10,000 cash transactions that aggregate to
+or above the $10,000 CTR reporting threshold within a rolling window.
+
+The agent is **deterministic first**: a pure rule engine produces the verdict,
+scores, and a plain-language rationale. An **optional** Amazon Bedrock reasoner
+can add a natural-language explanation; if it is disabled or fails, the service
+still returns the deterministic result (graceful fallback).
+
+> This is a flag for **Analyst review**, never a legal determination. Every
+> response carries a `modelDisclosure` to that effect.
+
+## Running the API
+
+```bash
+pip install -r requirements.txt
+
+# start the service (http://localhost:8000)
+python -m uvicorn app.main:app --port 8000
+# add --reload for autoreload during development (needs `watchfiles`)
+```
+
+Interactive Swagger UI: **http://localhost:8000/docs**
+
+- The **transaction path** (sending `transactions[]`) needs **no AWS**.
+- The **BSAID path** (sending `bsaId`) reads DynamoDB and needs AWS creds + the
+  `sar-prototype` table in the configured region.
+- **Model reasoning** (`enableModelReasoning: true`) calls Amazon Bedrock and
+  needs `bedrock:InvokeModel` permission; on any failure it degrades to the
+  rule-engine result with `modelReasoningAvailable: false`.
+
+## Request
+
+`POST /classify`
+
+Optional headers: `X-Request-Id` (echoed back as `requestId`), `X-Case-Id`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `transactions` | array | Each item: `amount` (string/number, non-negative, <=2 dp), `date` (ISO `YYYY-MM-DD`), `transactionType` (e.g. `CASH_DEPOSIT`, `WIRE`), optional `isCash`, `subject`, `tin`. A non-empty set takes precedence over `bsaId`. |
+| `bsaId` | string | Classify from a stored SAR record instead of itemized transactions. |
+| `rollingWindowDays` | int | Window span; defaults to 30. Values `< 1` are rejected (HTTP 400). |
+| `enableModelReasoning` | bool | Opt in to the Bedrock rationale. Defaults to `false`. |
+
+A request must include either a non-empty `transactions` set **or** a `bsaId`.
+
+### Example — structuring detected
+
+```json
+{
+  "transactions": [
+    { "amount": "9999.99", "date": "2024-01-01", "transactionType": "CASH_DEPOSIT" },
+    { "amount": "9999.99", "date": "2024-01-02", "transactionType": "CASH_DEPOSIT" }
+  ]
+}
+```
+
+## Response (`ClassificationResult`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `typology` | string \| null | `"Structuring"` when detected, else `null`. |
+| `riskScore` | int | 1–10. `1` when nothing is detected. |
+| `confidenceScore` | number | 0.0–1.0. |
+| `triggeringTransactions` | array | Contributing transactions (minimized; TIN shown as `tinLast4` only). |
+| `reportableTransactions` | array | Cash transactions `>= $10,000` recorded separately. |
+| `rationale` | string | Rule-based explanation (always present). |
+| `bsaId` | string \| null | Citation when derived from stored data. |
+| `modelReasoningAvailable` | bool | `true` only if a Bedrock rationale was produced. |
+| `modelReasoning` | string \| null | Natural-language rationale when available. |
+| `modelDisclosure` | string | Always present: AI-produced, requires Analyst review/approval. |
+| `syntheticDataDisclosure` | string \| null | Present when source data was synthetic. |
+| `requestId` | string \| null | Echo of `X-Request-Id`. |
+| `ambiguityNotes` | array \| null | Reported ambiguities (not auto-resolved). |
+
+### Validation / error codes
+
+| Condition | Status |
+|---|---|
+| Neither `transactions` nor `bsaId` provided | 400 |
+| Empty `transactions` set | 400 |
+| More than 10,000 transactions | 400 |
+| Missing required field / negative amount / >2 dp amount | 422 (model) |
+| Unparseable `date` | 400 (names field + index) |
+| `rollingWindowDays < 1` | 400 |
+| Malformed JSON body | 422 |
+| `bsaId` not found (BSAID path) | 404 |
+| Data source unavailable (BSAID path) | 503 |
+
+## Running the tests
+
+The full suite runs **offline** — DynamoDB and Bedrock are mocked.
+
+```bash
+python -m pytest tests/ -q          # all tests
+python -m pytest tests/ -v          # verbose
+python -m pytest tests/test_classify_api.py -v   # one file
+```
+
+Coverage includes: Rule_Engine property tests (Hypothesis), request/response
+validation, FastAPI endpoint tests, mocked-DynamoDB BSAID tests, mocked-Bedrock
+reasoning tests, a regression test that the existing read endpoints are
+unchanged, and human-in-the-loop disclosure assertions.
+
+## Testing with Postman
+
+1. **New request** → method `POST`, URL `http://localhost:8000/classify`.
+2. **Headers** tab: add `Content-Type: application/json` and optionally
+   `X-Request-Id: req-123`.
+3. **Body** tab → **raw** → **JSON**, paste the example request above.
+4. **Send**. You should get `200` with `"typology": "Structuring"`.
+5. Try the error cases from the table (e.g. empty `transactions`, or
+   `"rollingWindowDays": 0`) to see the 400/422 responses.
+
+Tip: you can also import the live OpenAPI schema into Postman from
+`http://localhost:8000/openapi.json` to auto-generate all requests.
