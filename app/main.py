@@ -10,12 +10,14 @@ Follows the design principles in SAR_Analysis_Agent_Design_Outline §4:
   - Common header validation (§4.3)
 """
 import base64
+import hmac
 import json
+import logging
 import os
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -32,6 +34,67 @@ from app.rule_engine import detect_structuring, StructuringVerdict
 from app.reasoner import generate_rationale
 
 app = FastAPI(title="SAR Data API", version="2.0.0")
+
+# Module-level logger for lightweight request logging. One info line per
+# request is emitted by the HTTP middleware below.
+logger = logging.getLogger("sar-api")
+
+
+# ---------------------------------------------------------------------------
+# API-key authentication (§ external-caller security — e.g. Pega)
+# ---------------------------------------------------------------------------
+
+def require_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
+    """FastAPI dependency enforcing API-key auth on protected endpoints.
+
+    The expected key is read LIVE from the ``API_KEY`` environment variable on
+    every call (via ``os.environ.get``) — intentionally NOT captured into a
+    module global at import time. Reading live means tests can
+    ``monkeypatch.setenv("API_KEY", ...)`` cleanly and there is no
+    import-order fragility.
+
+    Behavior:
+      * If ``API_KEY`` is NOT set (None or empty): authentication is DISABLED
+        and the request is allowed through. This is critical so the existing
+        test suite and local/dev runs keep working without configuring a key.
+      * If ``API_KEY`` IS set: the incoming ``X-API-Key`` header must equal it.
+        A missing or mismatched header raises HTTP 401. The comparison uses
+        ``hmac.compare_digest`` for constant-time (timing-safe) matching.
+
+    In production the ``API_KEY`` is supplied as an ECS task environment
+    variable / secret to turn authentication on.
+    """
+    expected = os.environ.get("API_KEY")
+    if not expected:
+        # Auth disabled — no key configured.
+        return
+    if x_api_key is None or not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# ---------------------------------------------------------------------------
+# Request logging middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log one lightweight info line per request.
+
+    Logs method, path, response status, and the ``X-Request-Id`` header (or
+    "-" when absent). Request bodies are never logged — they may carry
+    transaction data.
+    """
+    response = await call_next(request)
+    request_id = request.headers.get("X-Request-Id", "-")
+    logger.info(
+        "method=%s path=%s status=%s request_id=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        request_id,
+    )
+    return response
+
 
 # DynamoDB setup
 REGION = os.environ.get("AWS_REGION", "us-east-2")
@@ -148,7 +211,7 @@ def health():
 
 
 # §4.4.2 — GET /sars/{bsaId}
-@app.get("/sars/{bsa_id}")
+@app.get("/sars/{bsa_id}", dependencies=[Depends(require_api_key)])
 def get_sar_by_bsaid(
     bsa_id: str,
     x_case_id: Optional[str] = Header(None, alias="X-Case-Id"),
@@ -164,7 +227,7 @@ def get_sar_by_bsaid(
 
 
 # §4.4.3 — GET /institutions/{institutionId}/sars
-@app.get("/institutions/{institution_id}/sars")
+@app.get("/institutions/{institution_id}/sars", dependencies=[Depends(require_api_key)])
 def get_sars_by_institution(
     institution_id: str,
     since: str = "2000-01-01",
@@ -201,7 +264,7 @@ def get_sars_by_institution(
 
 
 # §4.4.4 — GET /classifications/{code}/sars
-@app.get("/classifications/{code}/sars")
+@app.get("/classifications/{code}/sars", dependencies=[Depends(require_api_key)])
 def get_sars_by_classification(
     code: str,
     since: str = "2000-01-01",
@@ -250,7 +313,7 @@ def get_sars_by_classification(
 
 
 # §4.4.1 — GET /entities/{entityId}/sars
-@app.get("/entities/{entity_id}/sars")
+@app.get("/entities/{entity_id}/sars", dependencies=[Depends(require_api_key)])
 def get_sars_by_entity(
     entity_id: str,
     x_case_id: Optional[str] = Header(None, alias="X-Case-Id"),
@@ -312,7 +375,7 @@ def get_sars_by_entity(
 
 
 # §4.4.5 — POST /entities:resolve (PII in headers only)
-@app.post("/entities:resolve")
+@app.post("/entities:resolve", dependencies=[Depends(require_api_key)])
 async def resolve_entity(
     request: Request,
     x_case_id: Optional[str] = Header(None, alias="X-Case-Id"),
@@ -662,7 +725,11 @@ def _classify_from_bsaid(
 
 
 # §Classification — POST /classify (SAR Classification Agent)
-@app.post("/classify", response_model=ClassificationResult)
+@app.post(
+    "/classify",
+    response_model=ClassificationResult,
+    dependencies=[Depends(require_api_key)],
+)
 def classify(
     body: ClassifyRequest,
     x_case_id: Optional[str] = Header(None, alias="X-Case-Id"),
