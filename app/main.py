@@ -19,6 +19,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import boto3
 from boto3.dynamodb.conditions import Key
 
@@ -38,6 +39,24 @@ app = FastAPI(title="SAR Data API", version="2.0.0")
 # Module-level logger for lightweight request logging. One info line per
 # request is emitted by the HTTP middleware below.
 logger = logging.getLogger("sar-api")
+
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
+
+class EntitySearchRequest(BaseModel):
+    """Request body for ``POST /entities/sars``.
+
+    Carries subject identifiers in the request BODY (not the URL) to avoid
+    placing PII such as a TIN in the URL path (§4.1). For now only ``tin`` is
+    used for the lookup; ``name``/``dob`` are accepted for forward
+    compatibility with richer entity resolution.
+    """
+
+    tin: Optional[str] = None
+    name: Optional[str] = None
+    dob: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +390,41 @@ def get_sars_by_entity(
         "entityId": entity_id,
         "sarCount": len(all_sars),
         "sars": [minimize_sar_response(item) for item in all_sars],
+    }
+
+
+# §4.4.1b — POST /entities/sars (TIN in request BODY, not URL — §4.1 PII)
+@app.post("/entities/sars", dependencies=[Depends(require_api_key)])
+def search_sars_by_entity(
+    body: EntitySearchRequest,
+    x_case_id: Optional[str] = Header(None, alias="X-Case-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-Id"),
+):
+    """Look up a subject's SARs by TIN supplied in the request BODY.
+
+    This mirrors the GSI2 fallback branch of ``GET /entities/{entity_id}/sars``
+    but keeps the identifier (TIN) out of the URL for PII reasons (§4.1). The
+    ``tin`` from the body is queried directly against GSI2 as
+    ``SUBJECT#{tin}``. Returns the same response shape as the GET endpoint.
+    """
+    validate_common_headers(x_case_id, x_request_id)
+
+    tin = body.tin
+    if not tin:
+        raise HTTPException(status_code=400, detail="tin is required")
+
+    result = table.query(
+        IndexName="GSI2-Subject",
+        KeyConditionExpression=Key("GSI2PK").eq(f"SUBJECT#{tin}"),
+    )
+    items = result.get("Items", [])
+    if not items:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    return {
+        "entityId": tin,
+        "sarCount": len(items),
+        "sars": [minimize_sar_response(item) for item in items],
     }
 
 

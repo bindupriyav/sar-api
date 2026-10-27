@@ -239,3 +239,51 @@ def test_resolve_entity_requires_subject_header() -> None:
     resp = client.post("/entities:resolve")
 
     assert resp.status_code == 400, resp.text
+
+
+# ---------------------------------------------------------------------------
+# POST /entities/sars  (TIN in request BODY — new endpoint)
+# ---------------------------------------------------------------------------
+
+def test_entities_sars_post_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST with a resolvable TIN in the body returns 200 and the SAR summary.
+
+    Mirrors the GET endpoint's GSI2 fallback response shape:
+    ``{entityId, sarCount, sars}``.
+    """
+
+    def fake_query(**kwargs):
+        return {"Items": [_minimal_sar_item()]}
+
+    monkeypatch.setattr(main.table, "query", fake_query)
+
+    resp = client.post("/entities/sars", json={"tin": "106-73-4850"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body.keys()) == {"entityId", "sarCount", "sars"}
+    assert body["entityId"] == "106-73-4850"
+    assert body["sarCount"] == 1
+    assert len(body["sars"]) == 1
+
+
+def test_entities_sars_post_missing_tin() -> None:
+    """POST with an empty body (no tin) returns 400 "tin is required"."""
+    resp = client.post("/entities/sars", json={})
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "tin is required"
+
+
+def test_entities_sars_post_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST with a TIN that resolves to no SARs returns 404 "Entity not found"."""
+
+    def fake_query(**kwargs):
+        return {"Items": []}
+
+    monkeypatch.setattr(main.table, "query", fake_query)
+
+    resp = client.post("/entities/sars", json={"tin": "000-00-0000"})
+
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "Entity not found"
