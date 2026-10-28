@@ -62,6 +62,13 @@ def _minimal_sar_item() -> Dict[str, Any]:
                     ],
                 }
             ],
+            "ActivityNarrativeInformation": [
+                {
+                    "ActivityID": 1,
+                    "ActivityNarrativeSequenceNumber": 1,
+                    "ActivityNarrativeText": "Test narrative about cash deposits.",
+                }
+            ],
             "Party": [
                 {
                     "ActivityPartyTypeCode": "33",
@@ -287,3 +294,22 @@ def test_entities_sars_post_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert resp.status_code == 404, resp.text
     assert resp.json()["detail"] == "Entity not found"
+
+
+# ---------------------------------------------------------------------------
+# POST /entities/sars  — suspiciousActivity now carries the SAR narrative text
+# ---------------------------------------------------------------------------
+
+def test_suspicious_activity_includes_narrative(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``suspiciousActivity`` sub-object exposes the concatenated narrative."""
+
+    def fake_query(**kwargs):
+        return {"Items": [_minimal_sar_item()]}
+
+    monkeypatch.setattr(main.table, "query", fake_query)
+
+    resp = client.post("/entities/sars", json={"tin": "106-73-4850"})
+
+    assert resp.status_code == 200, resp.text
+    narrative = resp.json()["sars"][0]["suspiciousActivity"]["ActivityNarrativeText"]
+    assert narrative == "Test narrative about cash deposits."

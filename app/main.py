@@ -173,6 +173,17 @@ def extract_classification_code(sar_item: dict) -> Optional[str]:
     return None
 
 
+def _extract_narrative(activity: dict) -> str:
+    """Concatenate ActivityNarrativeText entries ordered by sequence number.
+
+    Defensive: missing key / empty list / missing text → returns "".
+    """
+    narratives = activity.get("ActivityNarrativeInformation", []) or []
+    ordered = sorted(narratives, key=lambda n: n.get("ActivityNarrativeSequenceNumber", 0))
+    parts = [n.get("ActivityNarrativeText") for n in ordered if n.get("ActivityNarrativeText")]
+    return " ".join(parts)
+
+
 def minimize_sar_response(item: dict) -> dict:
     """Return a summary view of a SAR (for list endpoints). No full TIN ever returned."""
     activity = item.get("Activity", {})
@@ -215,6 +226,7 @@ def minimize_sar_response(item: dict) -> dict:
         "suspiciousActivity": {
             "totalSuspiciousAmount": suspicious[0].get("TotalSuspiciousAmountText") if suspicious else None,
             "classification": classifications,
+            "ActivityNarrativeText": _extract_narrative(activity),
         },
         "subjects": subjects,
     }
